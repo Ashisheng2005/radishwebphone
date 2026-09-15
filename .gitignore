@@ -28,3 +28,4 @@ src-tauri/gen/android/keystore.properties
 *.keystore
 __pycache__/
 *.pyc
+jskandpassword.env
