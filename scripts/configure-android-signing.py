@@ -2,6 +2,7 @@
 """Configure a freshly generated Tauri Android Gradle project for CI release signing."""
 from pathlib import Path
 import os
+import subprocess
 
 root = Path(__file__).resolve().parents[1]
 gradle = root / 'src-tauri/gen/android/app/build.gradle.kts'
@@ -29,6 +30,18 @@ except (ValueError, base64.binascii.Error) as error:
 if decoded_key[:4] != bytes.fromhex('feedfeed'):
     fail('ANDROID_KEY_BASE64 does not contain a JKS keystore')
 keystore.write_bytes(decoded_key)
+key_check = subprocess.run(
+    [
+        'keytool', '-list',
+        '-keystore', str(keystore),
+        '-storepass', os.environ['ANDROID_KEY_PASSWORD'],
+        '-alias', os.environ['ANDROID_KEY_ALIAS'],
+    ],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+if key_check.returncode != 0:
+    fail('JKS password or key alias does not match the configured keystore')
 properties.write_text(
     f"keyAlias={os.environ['ANDROID_KEY_ALIAS']}\n"
     f"password={os.environ['ANDROID_KEY_PASSWORD']}\n"
