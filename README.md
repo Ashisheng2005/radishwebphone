@@ -39,7 +39,7 @@ RadishWeb 的 Tauri 2 安卓客户端起步工程。只在本目录开发；`../
 
 ## GitHub Release 打包
 
-此应用使用独立仓库 [Ashisheng2005/radishwebphone](https://github.com/Ashisheng2005/radishwebphone) 发布。推送代码后，以 `v0.0.1` 形式打版本标签；`.github/workflows/android-release.yml` 会在 GitHub 的 Ubuntu runner 安装 Android SDK/NDK、生成 Tauri Android 项目、编译 arm64 APK、签名并上传到**草稿** GitHub Release。草稿经检查后再发布给用户。`workflow_dispatch` 用于人工验证流水线。
+此应用使用独立仓库 [Ashisheng2005/radishwebphone](https://github.com/Ashisheng2005/radishwebphone) 发布。推送代码后，以 `v0.0.2` 形式打版本标签；`.github/workflows/android-release.yml` 会在 GitHub 的 Ubuntu runner 安装 Android SDK/NDK、生成 Tauri Android 项目、写入正式应用图标、编译并签名 arm64 APK，然后创建正式 GitHub Release。`workflow_dispatch` 用于人工验证流水线。
 
 发布前须在仓库 Actions secrets 配置 `ANDROID_KEY_BASE64`（JKS 文件的 base64）、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。签名密钥和密码不可提交到仓库；后续版本必须复用同一签名密钥，否则现有安装无法直接升级。
 

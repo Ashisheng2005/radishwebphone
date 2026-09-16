@@ -431,7 +431,7 @@ function SettingsPage({ server, user, avatar, onClose, onSave, onLogout }: { ser
   return <div className="detail-overlay settings-page"><header><IconButton label="返回" onClick={onClose}><ArrowLeft size={22} /></IconButton><strong>设置</strong><span className="header-spacer" /></header><div className="settings-content">
     <section className="settings-profile"><UserAvatar src={avatar} name={user} /><div><strong>{user}</strong><span>radishtools 账号</span></div></section>
     <p className="settings-label">连接</p><section className="settings-group"><label><span><Server size={18} />服务器地址</span><input type="url" value={value} onChange={e => setValue(e.target.value)} /></label><p>修改服务器后需要重新登录，已有服务器的本地记录会继续保留。</p><button className="primary-button" disabled={value.trim() === server} onClick={() => onSave(value)}>保存并重新登录</button></section>
-    <p className="settings-label">应用</p><section className="settings-group info-rows"><div><span>界面</span><strong>跟随系统</strong></div><div><span>本地缓存</span><strong>已启用</strong></div><div><span>版本</span><strong>0.0.1</strong></div></section>
+    <p className="settings-label">应用</p><section className="settings-group info-rows"><div><span>界面</span><strong>跟随系统</strong></div><div><span>本地缓存</span><strong>已启用</strong></div><div><span>版本</span><strong>0.0.2</strong></div></section>
     <button className="logout-button" onClick={onLogout}><LogOut size={17} />退出当前账号</button>
   </div></div>
 }
