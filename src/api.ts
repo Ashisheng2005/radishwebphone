@@ -3,8 +3,11 @@ import { isTauri } from '@tauri-apps/api/core'
 
 export type Session = { access_token: string; user_name: string; email: string; avatar?: string | null }
 export type ImageItem = { uuid: string; filename: string; thumbnail_url: string; size: number; timestamp: string }
-export type StorageFile = { file_uuid: string; original_filename: string; size: number; mime_type: string; folder_name?: string }
-export type Blog = { file_uuid: string; title: string; summary: string; user_name: string; category: string; tags?: string[] }
+export type StorageFile = { file_uuid: string; original_filename: string; size: number; mime_type: string; folder_name?: string; folder_id?: number | null; created_at?: string }
+export type StorageFolder = { id: number; folder_name: string; file_count?: number; created_at?: string }
+export type StorageUsage = { used: number; max_storage: number; file_count: number; max_files?: number; usage_percent?: number }
+export type Blog = { file_uuid: string; title: string; summary: string; user_name: string; category: string; tags?: string[]; upload_time?: string; update_time?: string }
+export type Pagination = { current_page?: number; total_pages?: number; total_count?: number; has_next: boolean; has_prev?: boolean }
 
 const sessionKey = 'radish-phone-session'
 export const loadSession = (): Session | null => {
@@ -51,28 +54,35 @@ export class Api {
   imageList(page = 1) {
     const form = new FormData()
     form.append('pages', String(page))
-    form.append('page_size', '24')
-    return this.request<{ images: ImageItem[]; pagination: { has_next: boolean } }>('/api/image-bed/list', { method: 'POST', body: form })
+    form.append('page_size', '48')
+    return this.request<{ images: ImageItem[]; pagination: Pagination }>('/api/image-bed/list', { method: 'POST', body: form })
   }
   uploadImage(file: File) {
     const form = new FormData()
     form.append('file', file)
     return this.request('/api/image-bed/upload', { method: 'POST', body: form })
   }
-  storageList(page = 1) {
-    return this.request<{ files: StorageFile[]; pagination?: { has_next: boolean } }>(`/api/storage/list?page=${page}&page_size=20`)
+  storageList(page = 1, folderId?: number) {
+    const folder = folderId === undefined ? '' : `&folder_id=${folderId}`
+    return this.request<{ files: StorageFile[]; pagination?: Pagination }>(`/api/storage/list?page=${page}&page_size=50${folder}`)
   }
-  storageUsage() { return this.request<{ used: number; max_storage: number; file_count: number }>('/api/storage/disk-usage') }
+  storageUsage() { return this.request<StorageUsage>('/api/storage/disk-usage') }
+  storageFolders() { return this.request<{ folders: StorageFolder[] }>('/api/storage/folders') }
   uploadStorage(file: File) {
     const form = new FormData()
     form.append('file', file)
     return this.request('/api/storage/upload', { method: 'POST', body: form })
   }
   exploreBlogs(page = 1) {
-    return this.request<{ blogs: Blog[]; pagination: { has_next: boolean } }>(`/api/blog/explore/?page=${page}&page_size=10`)
+    return this.request<{ blogs: Blog[]; pagination: Pagination }>(`/api/blog/explore/?page=${page}&page_size=30`)
   }
-  blogContent(uuid: string) {
-    return this.request<string>(`/api/blog/content/${encodeURIComponent(uuid.replace(/\.md$/, ''))}.md`, { method: 'POST' })
+  async blogContent(uuid: string) {
+    const result = await this.request<string | { success?: boolean; data?: { content?: unknown }; content?: unknown; detail?: unknown }>(`/api/blog/content/${encodeURIComponent(uuid.replace(/\.md$/, ''))}.md`, { method: 'POST' })
+    if (typeof result === 'string') return result
+    const content = result?.data?.content ?? result?.content
+    if (typeof result?.detail === 'string') throw new Error(result.detail)
+    if (typeof content !== 'string') throw new Error('文章内容格式不正确')
+    return content
   }
   uploadBlog(file: File) {
     const form = new FormData()

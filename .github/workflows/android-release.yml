@@ -2,7 +2,7 @@ name: Android Release
 'on':
   push:
     tags:
-      - 'phone-v*'
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -50,8 +50,8 @@ jobs:
         with:
           mobile: android
           args: --apk --target aarch64
-          tagName: phone-v__VERSION__
-          releaseName: 'Radish Phone v__VERSION__'
+          tagName: v__VERSION__
+          releaseName: 'radishtools v__VERSION__'
           releaseBody: 'Android arm64 APK'
           releaseDraft: true
           prerelease: false
