@@ -6,14 +6,22 @@ import os
 root = Path(__file__).resolve().parents[1]
 gradle = root / 'src-tauri/gen/android/app/build.gradle.kts'
 properties = root / 'src-tauri/gen/android/keystore.properties'
-for name in ('ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD', 'ANDROID_KEY_BASE64'):
-    if not os.environ.get(name):
-        raise SystemExit(f'Missing GitHub Actions secret: {name}')
+required = ('ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD', 'ANDROID_KEY_BASE64')
+missing = [name for name in required if not os.environ.get(name)]
+if missing:
+    raise SystemExit(f'Missing GitHub Actions secret(s): {", ".join(missing)}')
 if not gradle.is_file():
-    raise SystemExit('Run tauri android init before configuring signing')
+    raise SystemExit(f'Android Gradle file was not generated: {gradle}')
 keystore = Path(os.environ['RUNNER_TEMP']) / 'radish-phone-release.jks'
 import base64
-keystore.write_bytes(base64.b64decode(os.environ['ANDROID_KEY_BASE64'], validate=True))
+try:
+    encoded_key = ''.join(os.environ['ANDROID_KEY_BASE64'].split())
+    decoded_key = base64.b64decode(encoded_key, validate=True)
+except (ValueError, base64.binascii.Error) as error:
+    raise SystemExit('ANDROID_KEY_BASE64 is not valid base64') from error
+if decoded_key[:4] != bytes.fromhex('feedfeed'):
+    raise SystemExit('ANDROID_KEY_BASE64 does not contain a JKS keystore')
+keystore.write_bytes(decoded_key)
 properties.write_text(
     f"keyAlias={os.environ['ANDROID_KEY_ALIAS']}\n"
     f"password={os.environ['ANDROID_KEY_PASSWORD']}\n"
@@ -42,4 +50,4 @@ if 'create("release")' not in text:
 if 'signingConfig = signingConfigs.getByName("release")' not in text:
     text = text.replace(anchor, anchor + '\n        getByName("release") { signingConfig = signingConfigs.getByName("release") }', 1)
 gradle.write_text(text)
-print('Android release signing configured')
+print(f'Android release signing configured with {len(decoded_key)}-byte JKS')
