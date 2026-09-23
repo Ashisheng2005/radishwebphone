@@ -8,7 +8,7 @@ import {
   SlidersHorizontal, Sparkles, WifiOff, X,
 } from 'lucide-react'
 import {
-  Api, loadSession, normalizeServer, saveSession,
+  Api, ApiError, loadLoginInfo, loadSession, normalizeServer, saveLoginInfo, saveSession,
   type Blog, type ImageItem, type Session, type StorageFile, type StorageFolder, type StorageUsage,
 } from './api'
 import { readCache, writeCache, type CloudSnapshot } from './cache'
@@ -26,6 +26,8 @@ const productionServer = 'https://radishtools.fun'
 const developmentServer = 'http://127.0.0.1:8002'
 const defaultServer = import.meta.env.DEV ? developmentServer : productionServer
 const developmentServerKey = 'radish-phone-development-server'
+const articleContentCache = new Map<string, string>()
+class TokenExpiredError extends Error {}
 if (import.meta.env.DEV && localStorage.getItem(developmentServerKey) !== developmentServer) {
   localStorage.setItem(serverKey, developmentServer)
   localStorage.setItem(developmentServerKey, developmentServer)
@@ -114,8 +116,8 @@ function App() {
   const [serverInput, setServerInput] = useState(initialServer)
   const [server, setServer] = useState(initialServer)
   const [session, setSession] = useState<Session | null>(loadSession)
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
+  const [username, setUsername] = useState(() => loadLoginInfo()?.username || '')
+  const [password, setPassword] = useState(() => loadLoginInfo()?.password || '')
   const [showServer, setShowServer] = useState(!initialServer)
   const [tab, setTab] = useState<Tab>('images')
   const [busy, setBusy] = useState(false)
@@ -123,7 +125,7 @@ function App() {
   const [message, setMessage] = useState('')
   const [search, setSearch] = useState('')
   const [selectedImage, setSelectedImage] = useState<ImageItem | null>(null)
-  const [selectedArticle, setSelectedArticle] = useState<{ blog: Blog; content: string } | null>(null)
+  const [selectedArticle, setSelectedArticle] = useState<{ blog: Blog; content: string | null; loading: boolean; error: string } | null>(null)
   const [fileView, setFileView] = useState<'list' | 'grid'>('list')
   const [activeFolder, setActiveFolder] = useState<StorageFolder | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -138,7 +140,8 @@ function App() {
     const client = new Api(server, session.access_token)
     try {
       const validity = await client.validate()
-      if (validity.detail !== 'yes') throw new Error('登录已过期，请重新登录')
+      if (validity.detail === 'no') throw new TokenExpiredError()
+      if (validity.detail !== 'yes') throw new Error('登录校验响应无效')
       if (target === 'chat') {
         setMessage('模型对话服务尚未接入，当前没有可同步的数据')
         return true
@@ -164,6 +167,14 @@ function App() {
       })
       return true
     } catch (error) {
+      const normalizedError = error instanceof ApiError && error.status === 401 ? new TokenExpiredError() : error
+      if (normalizedError instanceof TokenExpiredError) {
+        saveSession(null)
+        setSession(null)
+        setMessage('登录状态已过期，请重新登录')
+        setScreen('login')
+        return false
+      }
       const cached = readCache(server, session.user_name)
       if (cached.syncedAt) {
         setSnapshot(cached)
@@ -193,8 +204,8 @@ function App() {
     try {
       const nextServer = normalizeServer(serverInput)
       const result = await new Api(nextServer).login(username.trim(), password)
-      localStorage.setItem(serverKey, nextServer); saveSession(result)
-      setServer(nextServer); setSession(result); setPassword(''); setScreen('sync')
+      localStorage.setItem(serverKey, nextServer); saveSession(result); saveLoginInfo({ username: username.trim(), password })
+      setServer(nextServer); setSession(result); setScreen('sync')
     } catch (error) { setMessage(errorMessage(error, '无法连接登录服务，请检查服务地址')) }
     finally { setBusy(false) }
   }
@@ -221,12 +232,25 @@ function App() {
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
     finally { setBusy(false) }
   }
-  async function openArticle(blog: Blog) {
+  async function loadArticleContent(blog: Blog) {
     if (!api) return
-    setBusy(true); setMessage('')
-    try { setSelectedArticle({ blog, content: await api.blogContent(blog.file_uuid) }) }
-    catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
-    finally { setBusy(false) }
+    const uuid = blog.file_uuid
+    if (articleContentCache.has(uuid)) {
+      setSelectedArticle({ blog, content: articleContentCache.get(uuid) || '', loading: false, error: '' })
+      return
+    }
+    setSelectedArticle({ blog, content: null, loading: true, error: '' })
+    try {
+      const content = await api.blogContent(uuid)
+      articleContentCache.set(uuid, content)
+      setSelectedArticle(current => current?.blog.file_uuid === uuid ? { ...current, content, loading: false, error: '' } : current)
+    } catch (error) {
+      setSelectedArticle(current => current?.blog.file_uuid === uuid ? { ...current, loading: false, error: errorMessage(error, '文章内容暂时无法加载') } : current)
+    }
+  }
+  function openArticle(blog: Blog) {
+    setMessage('')
+    void loadArticleContent(blog)
   }
 
   if (screen === 'login') return <LoginScreen serverInput={serverInput} setServerInput={setServerInput} username={username} setUsername={setUsername} password={password} setPassword={setPassword} showServer={showServer} setShowServer={setShowServer} busy={busy} message={message} onLogin={() => void login()} />
@@ -243,8 +267,8 @@ function App() {
     </main>
     <BottomNav tab={tab} setTab={next => { setTab(next); setSearch(''); setSelectedArticle(null); setActiveFolder(null) }} />
   </div>
-  {selectedImage && <ImageViewer image={selectedImage} api={api!} onClose={() => setSelectedImage(null)} onMessage={setMessage} />}
-  {selectedArticle && <ArticleViewer article={selectedArticle} server={server} onClose={() => setSelectedArticle(null)} />}
+  {selectedImage && <ImageViewer key={selectedImage.uuid} image={selectedImage} api={api!} onClose={() => setSelectedImage(null)} onMessage={setMessage} />}
+  {selectedArticle && <ArticleViewer article={selectedArticle} server={server} onClose={() => setSelectedArticle(null)} onRetry={() => void loadArticleContent(selectedArticle.blog)} />}
   {settingsOpen && <SettingsPage server={server} user={session?.user_name || ''} avatar={avatarUrl(server, session?.avatar)} onClose={() => setSettingsOpen(false)} onSave={changeServer} onLogout={logout} />}
   </div>
 }
@@ -415,16 +439,51 @@ function BottomNav({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   return <nav className="bottom-nav">{items.map(({ key, label, icon: Icon }) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><span><Icon size={21} /></span><small>{label}</small></button>)}</nav>
 }
 function ImageViewer({ image, api, onClose, onMessage }: { image: ImageItem; api: Api; onClose: () => void; onMessage: (v: string) => void }) {
-  return <div className="detail-overlay image-viewer"><header><IconButton label="返回" onClick={onClose}><ArrowLeft size={22} /></IconButton><strong>照片详情</strong><IconButton label="更多"><MoreHorizontal size={22} /></IconButton></header><div className="image-stage"><img src={api.url(`/api/image-bed/image/${image.uuid}`)} alt={image.filename} /></div><div className="image-info"><div><strong>{image.filename}</strong><span>{formatSize(image.size)} · {formatDate(image.timestamp)}</span></div><button className="primary-button" onClick={() => void navigator.clipboard.writeText(api.url(`/api/image-bed/image/${image.uuid}`)).then(() => onMessage('图片链接已复制'))}>复制链接</button></div></div>
+  const thumbnailUrl = api.url(image.thumbnail_url)
+  const originalUrl = api.url(`/api/image-bed/image/${image.uuid}`)
+  const [originalLoaded, setOriginalLoaded] = useState(false)
+  const [originalLoading, setOriginalLoading] = useState(false)
+  const [originalError, setOriginalError] = useState('')
+  const preloadRef = useRef<HTMLImageElement | null>(null)
+
+  useEffect(() => () => {
+    if (preloadRef.current) {
+      preloadRef.current.onload = null
+      preloadRef.current.onerror = null
+      preloadRef.current = null
+    }
+  }, [])
+
+  function loadOriginal() {
+    if (originalLoaded || originalLoading) return
+    setOriginalLoading(true)
+    setOriginalError('')
+    const preload = new window.Image()
+    preloadRef.current = preload
+    preload.onload = () => {
+      setOriginalLoaded(true)
+      setOriginalLoading(false)
+      preloadRef.current = null
+    }
+    preload.onerror = () => {
+      setOriginalLoading(false)
+      setOriginalError('原图加载失败，当前仍显示缩略图')
+      preloadRef.current = null
+    }
+    preload.src = originalUrl
+  }
+
+  return <div className="detail-overlay image-viewer"><header><IconButton label="返回" onClick={onClose}><ArrowLeft size={22} /></IconButton><strong>照片详情</strong><IconButton label="更多"><MoreHorizontal size={22} /></IconButton></header><div className="image-stage"><img src={originalLoaded ? originalUrl : thumbnailUrl} alt={image.filename} />{originalLoading && <div className="image-loading"><LoaderCircle className="spin" size={18} />正在加载原图…</div>}</div><div className="image-info"><div><strong>{image.filename}</strong><span>{formatSize(image.size)} · {formatDate(image.timestamp)}</span>{originalError && <small className="image-load-error">{originalError}</small>}</div><div className="image-actions"><button className="secondary-button" disabled={originalLoaded || originalLoading} onClick={loadOriginal}>{originalLoaded ? '已显示原图' : originalLoading ? '加载中…' : '查看原图'}</button><button className="primary-button" onClick={() => void navigator.clipboard.writeText(originalUrl).then(() => onMessage('图片链接已复制'))}>复制链接</button></div></div></div>
 }
-function ArticleViewer({ article, server, onClose }: { article: { blog: Blog; content: string }; server: string; onClose: () => void }) {
-  const content = typeof article.content === 'string'
-    ? article.content
-    : String((article.content as unknown as { data?: { content?: unknown } })?.data?.content || '')
+function ArticleViewer({ article, server, onClose, onRetry }: { article: { blog: Blog; content: string | null; loading: boolean; error: string }; server: string; onClose: () => void; onRetry: () => void }) {
+  const content = article.content || ''
   const lines = content.split(/\r?\n/)
   const firstHeading = lines[0]?.match(/^#\s+(.+)$/)?.[1]?.trim()
   const markdown = firstHeading === article.blog.title.trim() ? lines.slice(1).join('\n').trimStart() : content
-  return <div className="detail-overlay article-viewer"><header><IconButton label="返回" onClick={onClose}><ArrowLeft size={22} /></IconButton><span>文章</span><IconButton label="更多"><MoreHorizontal size={22} /></IconButton></header><article><p className="article-category">{article.blog.category}</p><h1>{article.blog.title}</h1><div className="article-byline"><span className="mini-avatar">{article.blog.user_name.slice(0, 1).toUpperCase()}</span><div><strong>{article.blog.user_name}</strong><span><Clock3 size={13} />{formatDate(article.blog.upload_time)}</span></div></div><div className="article-body"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} urlTransform={url => url.startsWith('/') ? `${server}${url}` : url}>{markdown}</ReactMarkdown></div></article></div>
+  return <div className="detail-overlay article-viewer"><header><IconButton label="返回" onClick={onClose}><ArrowLeft size={22} /></IconButton><span>文章</span><IconButton label="更多"><MoreHorizontal size={22} /></IconButton></header><article><p className="article-category">{article.blog.category}</p><h1>{article.blog.title}</h1><div className="article-byline"><span className="mini-avatar">{article.blog.user_name.slice(0, 1).toUpperCase()}</span><div><strong>{article.blog.user_name}</strong><span><Clock3 size={13} />{formatDate(article.blog.upload_time)}</span></div></div><div className="article-body">{article.loading && <ArticleSkeleton />}{!article.loading && article.error && article.content === null && <div className="article-error"><p>{article.error}</p><button className="secondary-button" onClick={onRetry}><RefreshCw size={16} />重试</button></div>}{!article.loading && article.content !== null && <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} urlTransform={url => url.startsWith('/') ? `${server}${url}` : url}>{markdown}</ReactMarkdown>}</div></article></div>
+}
+function ArticleSkeleton() {
+  return <div className="article-skeleton" aria-label="正在加载文章"><span /><span /><span /><span /><span /><span /></div>
 }
 function SettingsPage({ server, user, avatar, onClose, onSave, onLogout }: { server: string; user: string; avatar: string; onClose: () => void; onSave: (server: string) => void; onLogout: () => void }) {
   const [value, setValue] = useState(server)

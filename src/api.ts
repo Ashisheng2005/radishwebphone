@@ -2,6 +2,7 @@ import { fetch as nativeFetch } from '@tauri-apps/plugin-http'
 import { isTauri } from '@tauri-apps/api/core'
 
 export type Session = { access_token: string; user_name: string; email: string; avatar?: string | null }
+export type LoginInfo = { username: string; password: string }
 export type ImageItem = { uuid: string; filename: string; thumbnail_url: string; size: number; timestamp: string }
 export type StorageFile = { file_uuid: string; original_filename: string; size: number; mime_type: string; folder_name?: string; folder_id?: number | null; created_at?: string }
 export type StorageFolder = { id: number; folder_name: string; file_count?: number; created_at?: string }
@@ -9,7 +10,17 @@ export type StorageUsage = { used: number; max_storage: number; file_count: numb
 export type Blog = { file_uuid: string; title: string; summary: string; user_name: string; category: string; tags?: string[]; upload_time?: string; update_time?: string }
 export type Pagination = { current_page?: number; total_pages?: number; total_count?: number; has_next: boolean; has_prev?: boolean }
 
+export class ApiError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 const sessionKey = 'radish-phone-session'
+const loginInfoKey = 'radish-phone-login-info'
 export const loadSession = (): Session | null => {
   try { return JSON.parse(localStorage.getItem(sessionKey) || 'null') as Session | null }
   catch { return null }
@@ -18,6 +29,13 @@ export const saveSession = (session: Session | null) => {
   if (session) localStorage.setItem(sessionKey, JSON.stringify(session))
   else localStorage.removeItem(sessionKey)
 }
+export const loadLoginInfo = (): LoginInfo | null => {
+  try {
+    const value = JSON.parse(localStorage.getItem(loginInfoKey) || 'null') as Partial<LoginInfo> | null
+    return value?.username && typeof value.password === 'string' ? { username: value.username, password: value.password } : null
+  } catch { return null }
+}
+export const saveLoginInfo = (info: LoginInfo) => localStorage.setItem(loginInfoKey, JSON.stringify(info))
 
 export function normalizeServer(value: string): string {
   const url = new URL(value.trim())
@@ -38,7 +56,7 @@ export class Api {
     if (!response.ok) {
       let detail = `HTTP ${response.status}`
       try { detail = (await response.json()).detail || detail } catch { /* non-JSON error */ }
-      throw new Error(String(detail))
+      throw new ApiError(String(detail), response.status)
     }
     const type = response.headers.get('content-type') || ''
     return (type.includes('application/json') ? response.json() : response.text()) as Promise<T>
