@@ -44,3 +44,14 @@ RadishWeb 的 Tauri 2 安卓客户端起步工程。只在本目录开发；`../
 发布前须在仓库 Actions secrets 配置 `ANDROID_KEY_BASE64`（JKS 文件的 base64）、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。签名密钥和密码不可提交到仓库；后续版本必须复用同一签名密钥，否则现有安装无法直接升级。
 
 流程基于 Tauri 的 [Android 签名说明](https://v2.tauri.app/distribute/sign/android/)和 [tauri-action 移动构建说明](https://github.com/tauri-apps/tauri-action)。
+
+### 手机端回归测试
+
+```bash
+npx playwright install chromium
+npm run test:browser
+```
+
+测试覆盖登录后不阻塞页面、分页结果及时显示、缓存与登录过期、云盘分组字段和上传目标、图片 MIME 兼容，以及本地 HTTP 服务上的真实上传字节进度。测试使用模拟业务接口，不上传到生产账户。
+
+文件上传使用 WebView 的 XMLHttpRequest，直接发送 multipart 文件并监听上传进度；接口服务器需允许应用来源的 CORS 请求及 Authorization 请求头（RadishWeb 当前已配置）。传输结束后显示“服务器处理中”，收到成功响应才提示上传完成。Android 系统选图器和生产服务器的端到端上传仍需真机验证。

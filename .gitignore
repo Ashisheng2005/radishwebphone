@@ -29,3 +29,7 @@ src-tauri/gen/android/keystore.properties
 __pycache__/
 *.pyc
 jskandpassword.env
+
+# Browser regression reports
+test-results/
+playwright-report/

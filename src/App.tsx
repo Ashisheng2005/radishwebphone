@@ -9,13 +9,13 @@ import {
 } from 'lucide-react'
 import {
   Api, ApiError, loadLoginInfo, loadSession, normalizeServer, saveLoginInfo, saveSession,
-  type Blog, type ImageItem, type Session, type StorageFile, type StorageFolder, type StorageUsage,
+  type UploadProgress, type Blog, type ImageItem, type Session, type StorageFile, type StorageFolder, type StorageUsage,
 } from './api'
 import { readCache, writeCache, type CloudSnapshot } from './cache'
 import './App.css'
 
 type Tab = 'images' | 'storage' | 'blogs' | 'chat'
-type Screen = 'login' | 'sync' | 'app'
+type Screen = 'login' | 'app'
 type IconType = typeof Images
 const markdownComponents: Components = {
   a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
@@ -27,7 +27,6 @@ const developmentServer = 'http://127.0.0.1:8002'
 const defaultServer = import.meta.env.DEV ? developmentServer : productionServer
 const developmentServerKey = 'radish-phone-development-server'
 const articleContentCache = new Map<string, string>()
-class TokenExpiredError extends Error {}
 if (import.meta.env.DEV && localStorage.getItem(developmentServerKey) !== developmentServer) {
   localStorage.setItem(serverKey, developmentServer)
   localStorage.setItem(developmentServerKey, developmentServer)
@@ -73,29 +72,32 @@ const avatarUrl = (server: string, avatar?: string | null) => {
   return `${server}${avatar.startsWith('/') ? '' : '/'}${avatar}`
 }
 
-async function loadAllImages(client: Api) {
+async function loadAllImages(client: Api, publish: (items: ImageItem[]) => void) {
   const items: ImageItem[] = []
   for (let page = 1; page <= 100; page += 1) {
     const result = await client.imageList(page)
     items.push(...(result.images || []))
+    publish([...items])
     if (!result.pagination?.has_next) break
   }
   return items
 }
-async function loadAllFiles(client: Api) {
+async function loadAllFiles(client: Api, publish: (items: StorageFile[]) => void) {
   const items: StorageFile[] = []
   for (let page = 1; page <= 100; page += 1) {
     const result = await client.storageList(page)
     items.push(...(result.files || []))
+    publish([...items])
     if (!result.pagination?.has_next) break
   }
   return items
 }
-async function loadAllBlogs(client: Api) {
+async function loadAllBlogs(client: Api, publish: (items: Blog[]) => void) {
   const items: Blog[] = []
   for (let page = 1; page <= 100; page += 1) {
     const result = await client.exploreBlogs(page)
     items.push(...(result.blogs || []))
+    publish([...items])
     if (!result.pagination?.has_next) break
   }
   return items
@@ -112,7 +114,7 @@ function UserAvatar({ src, name }: { src: string; name: string }) {
 }
 
 function App() {
-  const [screen, setScreen] = useState<Screen>(() => initialServer && loadSession() ? 'sync' : 'login')
+  const [screen, setScreen] = useState<Screen>(() => initialServer && loadSession() ? 'app' : 'login')
   const [serverInput, setServerInput] = useState(initialServer)
   const [server, setServer] = useState(initialServer)
   const [session, setSession] = useState<Session | null>(loadSession)
@@ -122,6 +124,8 @@ function App() {
   const [tab, setTab] = useState<Tab>('images')
   const [busy, setBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState<(UploadProgress & { name: string }) | null>(null)
+  const uploading = useRef(false)
   const [message, setMessage] = useState('')
   const [search, setSearch] = useState('')
   const [selectedImage, setSelectedImage] = useState<ImageItem | null>(null)
@@ -132,72 +136,62 @@ function App() {
   const [snapshot, setSnapshot] = useState<CloudSnapshot>(() => session && initialServer ? readCache(initialServer, session.user_name) : blankSnapshot())
   const api = useMemo(() => server ? new Api(server, session?.access_token) : null, [server, session])
 
-  const syncCloud = useCallback(async (background = false, target?: Tab) => {
-    if (!server || !session) return false
-    if (background) setRefreshing(true)
-    else setBusy(true)
-    setMessage('')
-    const client = new Api(server, session.access_token)
-    try {
-      const validity = await client.validate()
-      if (validity.detail === 'no') throw new TokenExpiredError()
-      if (validity.detail !== 'yes') throw new Error('登录校验响应无效')
-      if (target === 'chat') {
-        setMessage('模型对话服务尚未接入，当前没有可同步的数据')
-        return true
-      }
-      const updates: Partial<CloudSnapshot> = {}
-      if (!target) {
-        const [images, storage, blogs] = await Promise.all([
-          loadAllImages(client),
-          Promise.all([loadAllFiles(client), client.storageFolders(), client.storageUsage()]),
-          loadAllBlogs(client),
-        ])
-        updates.images = images; updates.files = storage[0]; updates.folders = storage[1].folders || []; updates.usage = storage[2]; updates.blogs = blogs
-      } else if (target === 'images') updates.images = await loadAllImages(client)
-      else if (target === 'storage') {
-        const [files, folders, usage] = await Promise.all([loadAllFiles(client), client.storageFolders(), client.storageUsage()])
-        updates.files = files; updates.folders = folders.folders || []; updates.usage = usage
-      }
-      else if (target === 'blogs') updates.blogs = await loadAllBlogs(client)
+  const currentApi = useRef(api)
+  useLayoutEffect(() => { currentApi.current = api }, [api])
+  const syncs = useRef(new Map<string, Promise<boolean>>())
+  const visited = useRef(new Set<string>())
+
+  const syncCloud = useCallback((_background = true, target: Tab = 'images') => {
+    if (!api || !session || target === 'chat') return Promise.resolve(false)
+    const client = api
+    const key = `${server}:${session.access_token}:${target}`
+    const pending = syncs.current.get(key)
+    if (pending) return pending
+    const publish = (updates: Partial<CloudSnapshot>) => {
+      if (currentApi.current !== client) return
       setSnapshot(current => {
-        const next = { ...current, ...updates, syncedAt: Date.now() }
-        writeCache(server, session.user_name, next)
+        const next = { ...current, ...updates }
+        try { writeCache(server, session.user_name, next) } catch { /* cache quota must not block cloud access */ }
         return next
       })
-      return true
-    } catch (error) {
-      const normalizedError = error instanceof ApiError && error.status === 401 ? new TokenExpiredError() : error
-      if (normalizedError instanceof TokenExpiredError) {
-        saveSession(null)
-        setSession(null)
-        setMessage('登录状态已过期，请重新登录')
-        setScreen('login')
-        return false
-      }
-      const cached = readCache(server, session.user_name)
-      if (cached.syncedAt) {
-        setSnapshot(cached)
-        setMessage(`当前显示本地记录 · ${errorMessage(error, '部分云端服务暂不可用')}`)
+    }
+    setRefreshing(true)
+    const task = (async () => {
+      try {
+        if (target === 'images') await loadAllImages(client, images => publish({ images }))
+        if (target === 'storage') await Promise.all([
+          loadAllFiles(client, files => publish({ files })),
+          client.storageFolders().then(result => publish({ folders: result.folders })),
+          client.storageUsage().then(usage => publish({ usage })),
+        ])
+        if (target === 'blogs') await loadAllBlogs(client, blogs => publish({ blogs }))
+        publish({ syncedAt: Date.now() })
         return true
+      } catch (error) {
+        if (currentApi.current !== client) return false
+        if (error instanceof ApiError && error.status === 401) {
+          currentApi.current = null
+          saveSession(null); setSession(null); setSnapshot(blankSnapshot()); setScreen('login')
+          setMessage('登录状态已过期，请重新登录')
+        } else setMessage(errorMessage(error, '同步失败，请点击刷新重试；已有内容仍可查看'))
+        visited.current.delete(key)
+        return false
+      } finally {
+        syncs.current.delete(key)
+        if (currentApi.current === client) setRefreshing(syncs.current.size > 0)
       }
-      setMessage(errorMessage(error, '部分云端服务暂不可用'))
-      return false
-    } finally { setBusy(false); setRefreshing(false) }
-  }, [server, session])
+    })()
+    syncs.current.set(key, task)
+    return task
+  }, [api, server, session])
 
   useEffect(() => {
-    if (screen !== 'sync') return
-    let active = true
-    // The sync screen owns this one-time network synchronization lifecycle.
-    // eslint-disable-next-line react/set-state-in-effect
-    void syncCloud().then(ok => {
-      if (!active) return
-      if (ok) window.setTimeout(() => active && setScreen('app'), 300)
-      else setScreen('login')
-    })
-    return () => { active = false }
-  }, [screen, syncCloud])
+    if (screen !== 'app' || !session) return
+    const key = `${server}:${session.access_token}:${tab}`
+    if (visited.current.has(key)) return
+    visited.current.add(key)
+    void syncCloud(true, tab)
+  }, [screen, server, session, tab, syncCloud])
 
   async function login() {
     setBusy(true); setMessage('')
@@ -205,32 +199,46 @@ function App() {
       const nextServer = normalizeServer(serverInput)
       const result = await new Api(nextServer).login(username.trim(), password)
       localStorage.setItem(serverKey, nextServer); saveSession(result); saveLoginInfo({ username: username.trim(), password })
-      setServer(nextServer); setSession(result); setScreen('sync')
+      visited.current.clear(); setRefreshing(false); setTab('images'); setActiveFolder(null)
+      setSnapshot(readCache(nextServer, result.user_name))
+      setServer(nextServer); setSession(result); setScreen('app')
     } catch (error) { setMessage(errorMessage(error, '无法连接登录服务，请检查服务地址')) }
     finally { setBusy(false) }
   }
   function logout() {
+    currentApi.current = null; visited.current.clear(); setRefreshing(false)
     saveSession(null); setSession(null); setSnapshot(blankSnapshot()); setScreen('login'); setShowServer(false); setMessage('')
   }
   function changeServer(value: string) {
     try {
       const nextServer = normalizeServer(value)
+      currentApi.current = null; visited.current.clear(); setRefreshing(false)
       localStorage.setItem(serverKey, nextServer); saveSession(null)
       setServerInput(nextServer); setServer(nextServer); setSession(null); setSnapshot(blankSnapshot())
       setSettingsOpen(false); setShowServer(false); setMessage('服务器已修改，请重新登录'); setScreen('login')
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
   }
   async function upload(kind: 'images' | 'storage' | 'blogs', file?: File) {
-    if (!file || !api) return
+    if (!file || !api || uploading.current) return
+    const client = api
+    uploading.current = true
+    const progress = (value: UploadProgress) => { if (currentApi.current === client) setUploadProgress({ ...value, name: file.name }) }
     setBusy(true); setMessage('')
     try {
-      if (kind === 'images') await api.uploadImage(file)
-      if (kind === 'storage') await api.uploadStorage(file)
-      if (kind === 'blogs') await api.uploadBlog(file)
+      if (kind === 'images') await api.uploadImage(file, progress)
+      if (kind === 'storage') await api.uploadStorage(file, progress, activeFolder?.id)
+      if (kind === 'blogs') await api.uploadBlog(file, progress)
+      if (currentApi.current !== client) return
+      setUploadProgress(null)
       setMessage(kind === 'blogs' ? '文章已提交，审核通过后会出现在“发现”中' : '上传完成')
-      await syncCloud(true, kind)
-    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
-    finally { setBusy(false) }
+      // Let a pre-upload listing finish before requesting the new server state.
+      const pending = syncs.current.get(`${server}:${session?.access_token}:${kind}`)
+      void (async () => {
+        if (pending) await pending
+        if (currentApi.current === client) await syncCloud(true, kind)
+      })()
+    } catch (error) { if (currentApi.current === client) setMessage(errorMessage(error, '上传失败')) }
+    finally { uploading.current = false; setBusy(false); setUploadProgress(null) }
   }
   async function loadArticleContent(blog: Blog) {
     if (!api) return
@@ -254,11 +262,11 @@ function App() {
   }
 
   if (screen === 'login') return <LoginScreen serverInput={serverInput} setServerInput={setServerInput} username={username} setUsername={setUsername} password={password} setPassword={setPassword} showServer={showServer} setShowServer={setShowServer} busy={busy} message={message} onLogin={() => void login()} />
-  if (screen === 'sync') return <SyncScreen user={session?.user_name || ''} failed={message} />
 
   return <div className="phone-shell"><div className="app-frame">
     <AppHeader tab={tab} user={session?.user_name || ''} avatar={avatarUrl(server, session?.avatar)} syncedAt={snapshot.syncedAt} refreshing={refreshing} onRefresh={() => void syncCloud(true, tab)} onSettings={() => setSettingsOpen(true)} onLogout={logout} />
     {message && <div className="notice"><WifiOff size={15} /><span>{message}</span><button onClick={() => setMessage('')}>关闭</button></div>}
+    {uploadProgress && <div className="upload-progress" role="status" aria-live="polite"><strong>{uploadProgress.name}</strong><span>{uploadProgress.phase === 'processing' ? '传输完成，服务器处理中…' : uploadProgress.total ? `正在上传 ${Math.floor(uploadProgress.loaded / uploadProgress.total * 100)}% · ${formatSize(uploadProgress.loaded)} / ${formatSize(uploadProgress.total)}` : '正在准备上传…'}</span><progress max={uploadProgress.total || 1} value={uploadProgress.phase === 'uploading' && uploadProgress.total ? uploadProgress.loaded : undefined} /></div>}
     <main className="app-content">
       {tab === 'images' && <GalleryPage items={snapshot.images} api={api!} search={search} setSearch={setSearch} busy={busy} onUpload={file => void upload('images', file)} onSelect={setSelectedImage} />}
       {tab === 'storage' && <StoragePage files={snapshot.files} folders={snapshot.folders} usage={snapshot.usage} activeFolder={activeFolder} setActiveFolder={setActiveFolder} view={fileView} setView={setFileView} busy={busy} onUpload={file => void upload('storage', file)} />}
@@ -290,10 +298,6 @@ function LoginScreen(p: LoginProps) {
     </section>
   </div>
 }
-function SyncScreen({ user, failed }: { user: string; failed: string }) {
-  return <div className="sync-screen"><div className="sync-graphic"><img src="/mascot-app-icon.png" alt="radishtools" /><span /></div><p className="eyebrow">RADISH CLOUD</p><h1>{failed ? '正在打开本地记录' : '正在准备你的空间'}</h1><p>{failed ? '网络暂时不可用，正在读取上次同步的内容。' : `${user ? `${user}，` : ''}照片、文件和文章正在从云端同步。`}</p><div className="sync-line"><span /></div></div>
-}
-
 const titles: Record<Tab, [string, string]> = { images: ['LIBRARY', '相册'], storage: ['CLOUD DRIVE', '文件'], blogs: ['DISCOVER', '发现'], chat: ['RADISH AI', '对话'] }
 function AppHeader({ tab, user, avatar, syncedAt, refreshing, onRefresh, onSettings, onLogout }: { tab: Tab; user: string; avatar: string; syncedAt: number; refreshing: boolean; onRefresh: () => void; onSettings: () => void; onLogout: () => void }) {
   const [menu, setMenu] = useState(false)
